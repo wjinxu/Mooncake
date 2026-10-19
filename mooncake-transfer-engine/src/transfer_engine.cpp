@@ -209,7 +209,7 @@ void* TransferEngine::allocateSharedMemory(size_t length,
 int TransferEngine::freeSharedMemory(void* addr) {
     return impl_->freeSharedMemory(addr);
 }
-
+// TE 提交一次传输
 Status TransferEngine::submitTransfer(
     BatchID batch_id, const std::vector<TransferRequest>& entries) {
     return impl_->submitTransfer(batch_id, entries);

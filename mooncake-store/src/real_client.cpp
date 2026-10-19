@@ -5022,7 +5022,8 @@ std::vector<tl::expected<void, ErrorCode>> RealClient::batch_put_from_internal(
     // Call client BatchPut and return the vector<expected> directly
     return client_->BatchPut(keys, ordered_batched_slices, config);
 }
-
+// Real Client 函数 ： 
+// put_from_interneal : 把一个 size 大小的 key 使用 config 配置 存到 buff 里面
 tl::expected<void, ErrorCode> RealClient::put_from_internal(
     const std::string &key, void *buffer, size_t size,
     const ReplicateConfig &config) {
@@ -5041,10 +5042,16 @@ tl::expected<void, ErrorCode> RealClient::put_from_internal(
         LOG(WARNING) << "Attempting to put empty data for key: " << key;
         return {};
     }
-
+    // 创建一个 slice，然后直接交给 put 函数
+    // struct Slice {
+    //     void* ptr;
+    //     size_t size;
+    // };
+    // Slice 就是一块小地址，代表切片
+    // 这个意思是把目标分成多个slices来传输
     // Create slices directly from the user buffer
     std::vector<mooncake::Slice> slices = split_into_slices(buffer, size);
-
+    // 调用内部 put 函数
     auto put_result = client_->Put(key, slices, config);
     if (!put_result) {
         return tl::unexpected(put_result.error());

@@ -1953,7 +1953,7 @@ bool Client::RedirectToHotCache(const std::string& key,
         reinterpret_cast<uintptr_t>(blk->addr);
     return true;
 }
-
+// 共有函数 clinet：Put
 tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
                                           std::vector<Slice>& slices,
                                           const ReplicateConfig& config) {
@@ -1966,7 +1966,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
         }
         object_checksum = *checksum_result;
     }
-
+    // 拿到所有的 slice 长度
     // Prepare slice lengths
     std::vector<size_t> slice_lengths;
     for (size_t i = 0; i < slices.size(); ++i) {
@@ -1981,7 +1981,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
     if (hot_cache_) {
         hot_cache_->RemoveHotKey(key);
     }
-
+    // 开始向 master 申请存储空间
     // Start put operation
     auto start_result = master_client_.PutStart(key, slice_lengths, client_cfg);
     if (!start_result &&
@@ -2004,7 +2004,9 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
         }
         return tl::unexpected(err);
     }
-
+    // 统计分配结果
+    // replica 就是分配出来的真实内存 一种副本位置描述
+    // 为什么是副本 ： 因为同一个对象可以在多个位置保存多份数据，所以每一份 replica 都是一个副本
     ReplicaTransferSummary transfer_summary;
     for (const auto& replica : start_result.value()) {
         transfer_summary.RecordAllocatedReplica(replica);
@@ -2027,14 +2029,18 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
             }
         }
     }
-
+    // 写入循环
     for (const auto& replica : start_result.value()) {
         if (replica.is_memory_replica() || replica.is_nof_replica()) {
             // Transfer data using allocated handles from all replicas
             const auto replica_type = replica.is_memory_replica()
                                           ? ReplicaType::MEMORY
                                           : ReplicaType::NOF_SSD;
+            // replica : Master 分配的目标地址
+            // slices : Client 手中的源地址和长度
+            // 然后进行传输
             ErrorCode transfer_err = TransferWrite(replica, slices);
+            // 记录本次传输
             if (transfer_err != ErrorCode::OK) {
                 transfer_summary.RecordFailure(replica_type, transfer_err);
                 continue;
@@ -4662,7 +4668,7 @@ ErrorCode Client::TransferData(const Replica::Descriptor& replica_descriptor,
         return ErrorCode::INVALID_PARAMS;
     }
 
-    std::optional<TransferFuture> future;
+    std::optional<TransferFuture> future; // 
     if (replica_descriptor.is_nof_replica()) {
         auto contiguous_range = GetContiguousSliceRange(slices);
         if (!contiguous_range.has_value()) {
@@ -4673,6 +4679,8 @@ ErrorCode Client::TransferData(const Replica::Descriptor& replica_descriptor,
                                              op_code, contiguous_range->ptr,
                                              contiguous_range->size, intent);
     } else {
+        // 给 transfer 提交一次写入 op
+        // future 一次提交的句柄
         future = transfer_submitter_->submit(replica_descriptor, slices,
                                              op_code, nullptr, 0, intent);
     }
@@ -4683,7 +4691,7 @@ ErrorCode Client::TransferData(const Replica::Descriptor& replica_descriptor,
 
     VLOG(1) << "Using transfer strategy: " << future->strategy();
 
-    return future->get();
+    return future->get(); // 同步等待返回结果
 }
 
 std::optional<TransferFuture> Client::SubmitRangeRead(
@@ -4944,10 +4952,11 @@ ErrorCode Client::TransferReadInternal(
 
     return future->get();
 }
-
+// 传输数据
 ErrorCode Client::TransferWrite(const Replica::Descriptor& replica_descriptor,
                                 std::vector<Slice>& slices,
                                 TransferIntent intent) {
+    // 封装 指定写
     return TransferData(replica_descriptor, slices, TransferRequest::WRITE,
                         intent);
 }

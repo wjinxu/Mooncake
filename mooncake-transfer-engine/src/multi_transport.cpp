@@ -246,13 +246,14 @@ Status MultiTransport::submitTransfer(
 Status MultiTransport::submitTransfer(
     BatchID batch_id, const std::vector<TransferRequest>& entries,
     std::vector<size_t>* task_sizes) {
-    auto& batch_desc = *((BatchDesc*)(batch_id));
+    // 获得对应的地址
+    auto& batch_desc = *((BatchDesc*)(batch_id)); // 一开始就是地址，现在转换成指针
     if (!task_sizes &&
-        batch_desc.task_list.size() + entries.size() > batch_desc.batch_size) {
+        batch_desc.task_list.size() + entries.size() > batch_desc.batch_size) { // 看看能不能提交更多的任务
         return Status::TooManyRequests(
             "Exceed the limitation of batch capacity");
     }
-
+    //选择对应的传输后端
     std::vector<Transport*> transports;
     auto select_status = selectTransports(entries, transports);
     if (!select_status.ok()) return select_status;
@@ -282,41 +283,49 @@ Status MultiTransport::submitTransfer(
                    transports[i + count] == transports[i])
                 ++count;
         }
+        // 给请求创建task
         auto& task = task_list.emplace_back();
-        task.batch_id = batch_id;
-        task.transport_ = transports[i];
+        task.batch_id = batch_id; // 属于哪批任务
+        task.transport_ = transports[i]; // 由哪个后端执行
 #ifdef USE_ASCEND_HETEROGENEOUS
         task.request = const_cast<Transport::TransferRequest*>(&entries[i]);
 #else
-        task.request = &entries[i];
+        task.request = &entries[i]; // 指向原始请求的起点
 #endif
-        task.request_count = count;
+        task.request_count = count; // 有几个请求
         if (transports[i]->supportsBatchCompletionCounter())
+        // 揭开封口
             Transport::Slice::unsealTaskSubmission(&task);
 #ifdef USE_EVENT_DRIVEN_COMPLETION
         if (count > 1) Transport::Slice::unsealTaskSubmission(&task);
 #endif
-        submit_tasks[transports[i]].push_back(&task);
+        submit_tasks[transports[i]].push_back(&task); // 把对应的task提交到相应的后端上
         if (task_sizes) task_sizes->push_back(count);
         i += count;
     }
     if (task_sizes) batch_desc.batch_size = task_list.size();
     Status overall_status = Status::OK();
+    // 提交线程：提交 A → 提交 B → 提交 C → 封口
+    // 后台线程：     A 就已经完成了
+    // 结束标志 ： 
+    // 已封口：不会再增加子任务
+    // 并且
+    // 已结束的子任务数量 == 子任务总数
     for (auto& entry : submit_tasks) {
-        auto status = entry.first->submitTransferTask(entry.second);
+        auto status = entry.first->submitTransferTask(entry.second); // 把任务交给后端去 transfer
         for (auto* task : entry.second) {
             if ((__atomic_load_n(&task->completion_state, __ATOMIC_RELAXED) &
                  Transport::Slice::kCompletionSealBit) == 0)
-                Transport::Slice::sealTaskSubmission(task);
+                Transport::Slice::sealTaskSubmission(task); // 封口
         }
-        if (!status.ok()) {
+        if (!status.ok()) { // 如果出错就后面一个个验证
             batch_desc.counter_eligible = false;
             // LOG(ERROR) << "Failed to submit transfer task to "
             //            << entry.first->getName();
             overall_status = status;
         }
     }
-    return overall_status;
+    return overall_status; // 代表是否提交成功
 }
 
 Status MultiTransport::submitScatter(
@@ -756,6 +765,7 @@ Status MultiTransport::selectTransports(
             request.target_id == reused_target) {
             transport = reused_transport;
         } else {
+            // 如果没有复用的情况，那就调用 selectTransport 寻找对应的后端
             auto status = selectTransport(request, transport, &reuse_allowed);
             if (!status.ok()) return status;
             assert(transport);
@@ -770,7 +780,10 @@ Status MultiTransport::selectTransports(
 Status MultiTransport::selectTransport(const TransferRequest& entry,
                                        Transport*& transport,
                                        bool* allows_reuse) {
+    // 查找对应的 TE 元数据，找到目标 segment使用的协议
+    // such as ：target_segment_desc->protocol == "rdma"
     auto target_segment_desc = metadata_->getSegmentDescByID(entry.target_id);
+    // 按照协议找到对应的后端对象
     if (!target_segment_desc) {
         if (allows_reuse) *allows_reuse = false;
         return Status::InvalidArgument("Invalid target segment ID " +

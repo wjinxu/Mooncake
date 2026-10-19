@@ -250,7 +250,7 @@ class Transport {
         static void unsealTaskSubmission(TransferTask *task) {
             __atomic_store_n(&task->completion_state, 0, __ATOMIC_RELEASE);
         }
-
+        // 提交封口，因为提交了 A，然后开始传输，可能在第二个提交之前A已经做完了，所以要有封口这个概念
         static void sealTaskSubmission(TransferTask *task) {
             const uint64_t state = __atomic_or_fetch(
                 &task->completion_state, kCompletionSealBit, __ATOMIC_ACQ_REL);

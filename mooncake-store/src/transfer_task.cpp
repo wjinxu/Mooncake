@@ -988,7 +988,8 @@ void TransferEngineOperationState::wait_for_completion() {
 // ============================================================================
 // TransferFuture Implementation
 // ============================================================================
-
+// 其实就是封装了一层state
+// 提供统一的接口
 TransferFuture::TransferFuture(std::shared_ptr<OperationState> state)
     : state_(std::move(state)) {
     if (!state_) {
@@ -1049,6 +1050,7 @@ TransferSubmitter::TransferSubmitter(TransferEngine& engine,
     VLOG(1) << "TransferSubmitter initialized with memcpy_enabled="
             << memcpy_enabled_;
 }
+// Transfer 进行一次提交
 
 std::optional<TransferFuture> TransferSubmitter::submit(
     const Replica::Descriptor& replica, std::vector<Slice>& slices,
@@ -1069,11 +1071,11 @@ std::optional<TransferFuture> TransferSubmitter::submit(
         } else {
             TransferStrategy strategy = selectStrategy(handle, slices);
 
-            switch (strategy) {
-                case TransferStrategy::LOCAL_MEMCPY:
+            switch (strategy) { // 根据传输策略选择
+                case TransferStrategy::LOCAL_MEMCPY: // 本地
                     future = submitMemcpyOperation(handle, slices, op_code);
                     break;
-                case TransferStrategy::TRANSFER_ENGINE:
+                case TransferStrategy::TRANSFER_ENGINE: // 传输引擎
                     future = submitTransferEngineOperation(handle, slices,
                                                            op_code, 0, intent);
                     break;
@@ -1717,6 +1719,7 @@ std::optional<TransferFuture> TransferSubmitter::submitMemcpyOperations(
 
 std::optional<TransferFuture> TransferSubmitter::submitTransfer(
     std::vector<TransferRequest>& requests, TransferIntent intent) {
+    // 这次提交多少条传输请求
     const size_t batch_size = requests.size();
 
     BatchID batch_id = INVALID_BATCH_ID;
@@ -1767,12 +1770,15 @@ std::optional<TransferFuture> TransferSubmitter::submitTransfer(
     } else
 #endif
     {
+        // 创建这批次请求的管理资源
         batch_id = engine_.allocateBatchID(batch_size);
         if (batch_id == INVALID_BATCH_ID) {
             LOG(ERROR) << "Failed to allocate batch ID";
             return std::nullopt;
         }
+        // 提交给 传输引擎 也就是TE
         s = engine_.submitTransfer(batch_id, requests);
+        // 获得提交状态
         if (!s.ok()) {
             LOG(ERROR) << "Failed to submit all transfers, error code is "
                        << s.code();
@@ -1780,7 +1786,7 @@ std::optional<TransferFuture> TransferSubmitter::submitTransfer(
             return std::nullopt;
         }
     }
-
+    // 保存查询这批传输所需要信息
     auto state = std::make_shared<TransferEngineOperationState>(
         engine_, batch_id, batch_size);
 
@@ -1800,6 +1806,7 @@ std::optional<TransferFuture> TransferSubmitter::submitTransferEngineOperation(
 #ifdef USE_TENT
     if (tent_engine_) {
         tent::SegmentID seg_id;
+        // 获得对应的 Segment 的句柄
         auto status =
             tent_engine_->openSegment(seg_id, handle.transport_endpoint_);
         if (!status.ok()) {
@@ -1839,6 +1846,7 @@ std::optional<TransferFuture> TransferSubmitter::submitTransferEngineOperation(
         offset += slice.size;
         requests.emplace_back(request);
     }
+    // 构建一个真实的请求，发送诶引擎
     return submitTransfer(requests, intent);
 }
 

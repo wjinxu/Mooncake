@@ -116,7 +116,7 @@ static uint64_t bytesUntilBufferEnd(
     }
     return max_remaining;
 }
-
+// 计算切片，因为可能一次传输不完
 // Calculate slice length capped at MR boundary to avoid multi-MR WRs.
 struct SliceLengthCalculator {
     const Transport::TransferRequest &request;
@@ -130,10 +130,12 @@ struct SliceLengthCalculator {
     int *tgt_buffer_idx;
 
     inline size_t calculate(uint64_t offset) {
-        const size_t remaining = request.length - offset;
+        const size_t remaining = request.length - offset; // 请求还剩多少字节
+        // block_size : 正常切分大小
         size_t slice_length =
-            remaining <= block_size + fragment_size ? remaining : block_size;
+            remaining <= block_size + fragment_size ? remaining : block_size; // 允许多取一点点，避免产生一个很小的 Slice
 
+        // 看目标和源 注册区域的大小 取最小值
         const uint64_t src_rem = bytesUntilBufferEnd(
             local_desc, reinterpret_cast<uint64_t>(request.source) + offset,
             false, src_buffer_idx);
@@ -938,17 +940,18 @@ Status RdmaTransport::submitTransfer(
     }
     return submitTransferTask(task_list);
 }
-
+// RDMA 传输
 Status RdmaTransport::submitTransferTask(
     const std::vector<TransferTask *> &task_list) {
+    // RDMAContext ： 使用某块 RDMA 所需要的上下
     std::unordered_map<std::shared_ptr<RdmaContext>, std::vector<Slice *>>
-        slices_to_post;
+        slices_to_post; // 代表一块 RDMA 传输哪些 slices
     std::unordered_map<SegmentID, std::shared_ptr<SegmentDesc>>
-        target_segment_descs;
-    auto local_segment_desc = metadata_->getSegmentDescByID(LOCAL_SEGMENT_ID);
+        target_segment_descs; // 缓存 SegmentID，防止取多次
+    auto local_segment_desc = metadata_->getSegmentDescByID(LOCAL_SEGMENT_ID); // 获得本地的 local_segment，因为传出去之前要先写到本地
     assert(local_segment_desc.get());
-    const auto &local_hca_list = local_segment_desc->topology.getHcaList();
-    auto nic_hint_name = [&local_hca_list](int nic_hint) -> std::string_view {
+    const auto &local_hca_list = local_segment_desc->topology.getHcaList(); // 从本地 segment 的拓扑信息中取出 RDMA 网卡名称列表
+    auto nic_hint_name = [&local_hca_list](int nic_hint) -> std::string_view { // 将请求里面的 nic_hint 变成对应的 name
         if (nic_hint < 0 ||
             static_cast<size_t>(nic_hint) >= local_hca_list.size()) {
             return {};
@@ -1000,7 +1003,7 @@ Status RdmaTransport::submitTransferTask(
     int last_local_device_buffer_id = -1;
     int last_remote_buffer_id = -1;
     SegmentID last_remote_target_id = static_cast<SegmentID>(-1);
-    while (task_index < task_list.size()) {
+    while (task_index < task_list.size()) { // 遍历 Task 以及 Task 包含的 request
         assert(task_list[task_index]);
         auto &task = *task_list[task_index];
         const size_t current_task_index = task_index;
@@ -1011,12 +1014,13 @@ Status RdmaTransport::submitTransferTask(
             ++task_index;
             request_index = 0;
         }
-        auto target_desc_it = target_segment_descs.find(request.target_id);
-        if (target_desc_it == target_segment_descs.end()) {
+        // 获得对应的描述
+        auto target_desc_it = target_segment_descs.find(request.target_id); // 查找缓存
+        if (target_desc_it == target_segment_descs.end()) { //如果没有缓存
             target_desc_it =
                 target_segment_descs
                     .emplace(request.target_id,
-                             metadata_->getSegmentDescByID(request.target_id))
+                             metadata_->getSegmentDescByID(request.target_id)) // 就去找对应的Segment 这个早就 通过TE注册好了
                     .first;
         }
         const auto &target_segment_desc = target_desc_it->second;
@@ -1028,6 +1032,9 @@ Status RdmaTransport::submitTransferTask(
         // Select once per request so all of its slices normally use the same
         // local RNIC. The advisory hint affects initial submission only;
         // submit-level retries keep the existing topology policy.
+        // request_buffer_id 对应的 Segment 中哪个 buffer
+        // request_device_id 使用哪个 RDMA 设备
+        // -1 代表还没找到
         auto request_buffer_id = -1, request_device_id = -1;
         const std::string_view request_hint =
             request.advise_retry_cnt == 0 ? nic_hint_name(request.nic_hint)
@@ -1037,7 +1044,9 @@ Status RdmaTransport::submitTransferTask(
                     last_local_device_buffer_id == last_local_buffer_id
                 ? last_local_device_id
                 : -1;
+        // 先尝试缓存，否则真正执行
         if (local_device_cache.select(
+                // 拿源地址和请求长度 找到一个能覆盖的buffer，根据这个 buffer 的内存来选择设备
                 local_segment_desc, (uint64_t)request.source, request.length,
                 request_buffer_id, request_device_id, [&] {
                     return selectDevice(
@@ -1046,6 +1055,7 @@ Status RdmaTransport::submitTransferTask(
                         request_device_id, 0, last_local_buffer_id,
                         local_hint_device_id);
                 })) {
+            // 看是否选择成功
             request_buffer_id = -1;
             request_device_id = -1;
         } else {
@@ -1062,7 +1072,7 @@ Status RdmaTransport::submitTransferTask(
                                          &last_local_buffer_id,
                                          &last_remote_buffer_id};
         for (uint64_t offset = 0; offset < request.length;) {
-            size_t slice_length = slice_calc.calculate(offset);
+            size_t slice_length = slice_calc.calculate(offset); // 开始计算每个切片要传输多少
 
             Slice *slice = getSliceCache().allocate();
             assert(slice);
@@ -1094,7 +1104,7 @@ Status RdmaTransport::submitTransferTask(
                     device_id = request_device_id;
                 }
             }
-            while (retry_cnt < kMaxRetryCount && !found_device) {
+            while (retry_cnt < kMaxRetryCount && !found_device) { // 看看前面是否找到了对应的网卡和buff，如果找到了就复用，不行就给每个slice在找一下
                 // The request-level lookup above can fail when a request spans
                 // registered-memory boundaries even though each slice is
                 // valid. Honor the hint for the initial per-slice attempt too,
@@ -1146,18 +1156,19 @@ Status RdmaTransport::submitTransferTask(
                                                    std::to_string(device_id) +
                                                    " is not active");
                 }
-                slice->rdma.source_lkey =
+                slice->rdma.source_lkey = // 填入对应的本地 lkey (也就是本地的地址)
                     local_segment_desc->buffers[buffer_id].lkey[device_id];
                 if (globalConfig().log_rdma_slice_affinity) {
                     slice->source_location = resolveBufferLocation(
                         local_segment_desc->buffers[buffer_id],
                         reinterpret_cast<uint64_t>(slice->source_addr));
                 }
+                // 加入代提交列表并登记任务数量
                 slices_to_post[context].push_back(slice);
                 task.total_bytes += slice->length;
                 __sync_fetch_and_add(&task.slice_count, 1);
             }
-
+            // 把准备好的 Slice 交给 context
             if (nr_slices >= kSubmitWatermark) {
                 for (auto &entry : slices_to_post)
                     entry.first->submitPostSend(entry.second);
